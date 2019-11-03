@@ -2,6 +2,7 @@
 
 use ammonia::{Builder, UrlRelative, UrlRelativeEvaluate};
 use htmlescape::encode_minimal;
+use orgize::Org;
 use std::borrow::Cow;
 use std::path::Path;
 use swirl::errors::PerformError;
@@ -9,6 +10,7 @@ use url::Url;
 
 use crate::background_jobs::Environment;
 use crate::models::Version;
+use orgize::export::{DefaultHtmlHandler, HtmlHandler};
 
 /// Context for markdown to HTML rendering.
 #[allow(missing_debug_implementations)]
@@ -56,7 +58,7 @@ impl<'a> MarkdownRenderer<'a> {
     }
 
     /// Renders the given markdown to HTML using the current settings.
-    fn to_html(&self, text: &str) -> String {
+    fn markdown_to_html(&self, text: &str) -> String {
         let options = comrak::ComrakOptions {
             unsafe_: true, // The output will be sanitized with `ammonia`
             ext_autolink: true,
@@ -70,7 +72,19 @@ impl<'a> MarkdownRenderer<'a> {
         let rendered = comrak::markdown_to_html(text, &options);
         self.html_sanitizer.clean(&rendered).to_string()
     }
+
+    fn org_to_html(&self, text: &str) -> String {
+        let mut html_buf = Vec::new();
+        let rendered: String = match Org::parse(text).write_html(&mut html_buf) {
+            Ok(_) => String::from_utf8_lossy(&html_buf).to_string(),
+            Err(_) => text.into(),
+        };
+        self.html_sanitizer.clean(&rendered).to_string()
+    }
 }
+
+// #[derive(Default)]
+// struct OrgModeSrcHandler(DefaultHtmlHandler);
 
 /// Add trailing slash and remove `.git` suffix of base URL.
 fn canon_base_url(mut base_url: String) -> String {
@@ -140,9 +154,16 @@ impl UrlRelativeEvaluate for SanitizeUrl {
 
 /// Renders Markdown text to sanitized HTML with a given `base_url`.
 /// See `readme_to_html` for the interpretation of `base_url`.
+fn org_to_html(text: &str, base_url: Option<&str>) -> String {
+    let renderer = MarkdownRenderer::new(base_url);
+    renderer.org_to_html(text)
+}
+
+/// Renders Markdown text to sanitized HTML with a given `base_url`.
+/// See `readme_to_html` for the interpretation of `base_url`.
 fn markdown_to_html(text: &str, base_url: Option<&str>) -> String {
     let renderer = MarkdownRenderer::new(base_url);
-    renderer.to_html(text)
+    renderer.markdown_to_html(text)
 }
 
 /// Any readme with a filename ending in one of these extensions will be rendered as Markdown.
@@ -181,6 +202,10 @@ pub fn readme_to_html(text: &str, filename: &str, base_url: Option<&str>) -> Str
 
     if !filename.contains('.') || MARKDOWN_EXTENSIONS.iter().any(|e| filename.ends_with(e)) {
         return markdown_to_html(text, base_url);
+    }
+
+    if filename.ends_with(".org") {
+        return org_to_html(text, base_url);
     }
 
     encode_minimal(text).replace("\n", "<br>\n")
@@ -272,8 +297,7 @@ mod tests {
 
     #[test]
     fn text_with_inline_javascript() {
-        let text =
-            r#"foo_readme\n\n<a href="https://crates.io/crates/cargo-registry" onclick="window.alert('Got you')">Crate page</a>"#;
+        let text = r#"foo_readme\n\n<a href="https://crates.io/crates/cargo-registry" onclick="window.alert('Got you')">Crate page</a>"#;
         let result = markdown_to_html(text, None);
         assert_eq!(
             result,
