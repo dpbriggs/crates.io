@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn readme_to_html_renders_other_things() {
-        for f in &["readme.exe", "readem.org", "blah.adoc"] {
+        for f in &["readme.exe", "readem.not_org", "blah.adoc"] {
             assert_eq!(
                 readme_to_html("<script>lobster</script>\n\nis my friend\n", f, None),
                 "&lt;script&gt;lobster&lt;/script&gt;<br>\n<br>\nis my friend<br>\n"
