@@ -2,8 +2,8 @@
 
 use ammonia::{Builder, UrlRelative, UrlRelativeEvaluate};
 use htmlescape::encode_minimal;
-use orgize::Org;
 use std::borrow::Cow;
+use std::io::Write;
 use std::path::Path;
 use swirl::errors::PerformError;
 use url::Url;
@@ -11,6 +11,7 @@ use url::Url;
 use crate::background_jobs::Environment;
 use crate::models::Version;
 use orgize::export::{DefaultHtmlHandler, HtmlHandler};
+use orgize::{Element, Org};
 
 /// Context for markdown to HTML rendering.
 #[allow(missing_debug_implementations)]
@@ -73,18 +74,59 @@ impl<'a> MarkdownRenderer<'a> {
         self.html_sanitizer.clean(&rendered).to_string()
     }
 
-    fn org_to_html(&self, text: &str) -> String {
+    fn org_to_html(&self, text: &str) -> Option<String> {
+        let mut handler = OrgModeSrcHandler::default();
         let mut html_buf = Vec::new();
-        let rendered: String = match Org::parse(text).write_html(&mut html_buf) {
-            Ok(_) => String::from_utf8_lossy(&html_buf).to_string(),
-            Err(_) => text.into(),
-        };
-        self.html_sanitizer.clean(&rendered).to_string()
+        Org::parse(text)
+            .write_html_custom(&mut html_buf, &mut handler)
+            .ok()?;
+        Some(
+            self.html_sanitizer
+                .clean(&String::from_utf8_lossy(&html_buf))
+                .to_string(),
+        )
     }
 }
 
-// #[derive(Default)]
-// struct OrgModeSrcHandler(DefaultHtmlHandler);
+/// Formats Org Mode Source Blocks to have syntax highlighting.
+#[derive(Default)]
+struct OrgModeSrcHandler(DefaultHtmlHandler);
+
+/// Format Org Mode "Src" blocks to have syntax highlighting.
+/// Uses the same code format as comrak.
+impl HtmlHandler<std::io::Error> for OrgModeSrcHandler {
+    fn start<'a, W: Write>(
+        &'a mut self,
+        mut w: W,
+        element: &'a Element<'_>,
+    ) -> Result<(), std::io::Error> {
+        if let Element::SourceBlock(src_block) = element {
+            write!(
+                w,
+                "<pre><code class=\"language-{}\">{}",
+                src_block.language, src_block.contents
+            )?;
+        } else {
+            // fallthrough to default handler
+            self.0.start(w, element)?;
+        }
+        Ok(())
+    }
+
+    fn end<'a, W: Write>(
+        &'a mut self,
+        mut w: W,
+        element: &'a Element<'_>,
+    ) -> Result<(), std::io::Error> {
+        if let Element::SourceBlock(_src_block) = element {
+            write!(w, "</code></pre>")?;
+        } else {
+            // fallthrough to default handler
+            self.0.end(w, element)?;
+        }
+        Ok(())
+    }
+}
 
 /// Add trailing slash and remove `.git` suffix of base URL.
 fn canon_base_url(mut base_url: String) -> String {
@@ -154,7 +196,7 @@ impl UrlRelativeEvaluate for SanitizeUrl {
 
 /// Renders Markdown text to sanitized HTML with a given `base_url`.
 /// See `readme_to_html` for the interpretation of `base_url`.
-fn org_to_html(text: &str, base_url: Option<&str>) -> String {
+fn org_to_html(text: &str, base_url: Option<&str>) -> Option<String> {
     let renderer = MarkdownRenderer::new(base_url);
     renderer.org_to_html(text)
 }
@@ -205,7 +247,9 @@ pub fn readme_to_html(text: &str, filename: &str, base_url: Option<&str>) -> Str
     }
 
     if filename.ends_with(".org") {
-        return org_to_html(text, base_url);
+        if let Some(html) = org_to_html(text, base_url) {
+            return html;
+        }
     }
 
     encode_minimal(text).replace("\n", "<br>\n")
