@@ -15,16 +15,55 @@ use orgize::{Element, Org};
 
 /// Context for markdown to HTML rendering.
 #[allow(missing_debug_implementations)]
-struct MarkdownRenderer<'a> {
+struct MarkdownRenderer<'a, T> {
     html_sanitizer: Builder<'a>,
+    src: T,
 }
 
-impl<'a> MarkdownRenderer<'a> {
+/// Convert my source file to HTML.
+trait SourceToHTML {
+    fn to_html(&self, text: &str) -> Option<String>;
+}
+
+/// Marker for Markdown formatted text.
+struct Markdown;
+
+impl SourceToHTML for Markdown {
+    fn to_html(&self, text: &str) -> Option<String> {
+        let options = comrak::ComrakOptions {
+            unsafe_: true, // The output will be sanitized with `ammonia`
+            ext_autolink: true,
+            ext_strikethrough: true,
+            ext_table: true,
+            ext_tagfilter: true,
+            ext_tasklist: true,
+            ext_header_ids: Some("user-content-".to_string()),
+            ..comrak::ComrakOptions::default()
+        };
+        Some(comrak::markdown_to_html(text, &options))
+    }
+}
+
+/// Marker for OrgMode source files.
+struct OrgMode;
+
+impl SourceToHTML for OrgMode {
+    fn to_html(&self, text: &str) -> Option<String> {
+        let mut handler = OrgModeSrcHandler::default();
+        let mut html_buf = Vec::new();
+        Org::parse(text)
+            .write_html_custom(&mut html_buf, &mut handler)
+            .ok()?;
+        Some(String::from_utf8_lossy(&html_buf).into())
+    }
+}
+
+impl<'a, Src: SourceToHTML> MarkdownRenderer<'a, Src> {
     /// Creates a new renderer instance.
     ///
     /// Per `readme_to_html`, `base_url` is the base URL prepended to any
     /// relative links in the input document.  See that function for more detail.
-    fn new(base_url: Option<&'a str>) -> MarkdownRenderer<'a> {
+    fn new(base_url: Option<&'a str>, src: Src) -> MarkdownRenderer<'a, Src> {
         let allowed_classes = hashmap(&[(
             "code",
             hashset(&[
@@ -55,36 +94,16 @@ impl<'a> MarkdownRenderer<'a> {
             .allowed_classes(allowed_classes)
             .url_relative(sanitize_url)
             .id_prefix(Some("user-content-"));
-        MarkdownRenderer { html_sanitizer }
+        MarkdownRenderer {
+            html_sanitizer,
+            src,
+        }
     }
 
-    /// Renders the given markdown to HTML using the current settings.
-    fn markdown_to_html(&self, text: &str) -> String {
-        let options = comrak::ComrakOptions {
-            unsafe_: true, // The output will be sanitized with `ammonia`
-            ext_autolink: true,
-            ext_strikethrough: true,
-            ext_table: true,
-            ext_tagfilter: true,
-            ext_tasklist: true,
-            ext_header_ids: Some("user-content-".to_string()),
-            ..comrak::ComrakOptions::default()
-        };
-        let rendered = comrak::markdown_to_html(text, &options);
-        self.html_sanitizer.clean(&rendered).to_string()
-    }
-
-    fn org_to_html(&self, text: &str) -> Option<String> {
-        let mut handler = OrgModeSrcHandler::default();
-        let mut html_buf = Vec::new();
-        Org::parse(text)
-            .write_html_custom(&mut html_buf, &mut handler)
-            .ok()?;
-        Some(
-            self.html_sanitizer
-                .clean(&String::from_utf8_lossy(&html_buf))
-                .to_string(),
-        )
+    fn to_html(&self, text: &str) -> Option<String> {
+        self.src
+            .to_html(text)
+            .map(|html| self.html_sanitizer.clean(&html).to_string())
     }
 }
 
@@ -95,6 +114,7 @@ struct OrgModeSrcHandler(DefaultHtmlHandler);
 /// Format Org Mode "Src" blocks to have syntax highlighting.
 /// Uses the same code format as comrak.
 impl HtmlHandler<std::io::Error> for OrgModeSrcHandler {
+    /// Format org source blocks to have syntax hightlighting.
     fn start<'a, W: Write>(
         &'a mut self,
         mut w: W,
@@ -107,12 +127,13 @@ impl HtmlHandler<std::io::Error> for OrgModeSrcHandler {
                 src_block.language, src_block.contents
             )?;
         } else {
-            // fallthrough to default handler
+            // Use usual html handler
             self.0.start(w, element)?;
         }
         Ok(())
     }
 
+    /// Properly delimit org mode source blocks.
     fn end<'a, W: Write>(
         &'a mut self,
         mut w: W,
@@ -121,7 +142,7 @@ impl HtmlHandler<std::io::Error> for OrgModeSrcHandler {
         if let Element::SourceBlock(_src_block) = element {
             write!(w, "</code></pre>")?;
         } else {
-            // fallthrough to default handler
+            // Use usual html handler
             self.0.end(w, element)?;
         }
         Ok(())
@@ -197,15 +218,15 @@ impl UrlRelativeEvaluate for SanitizeUrl {
 /// Renders Markdown text to sanitized HTML with a given `base_url`.
 /// See `readme_to_html` for the interpretation of `base_url`.
 fn org_to_html(text: &str, base_url: Option<&str>) -> Option<String> {
-    let renderer = MarkdownRenderer::new(base_url);
-    renderer.org_to_html(text)
+    MarkdownRenderer::new(base_url, OrgMode).to_html(text)
 }
 
 /// Renders Markdown text to sanitized HTML with a given `base_url`.
 /// See `readme_to_html` for the interpretation of `base_url`.
 fn markdown_to_html(text: &str, base_url: Option<&str>) -> String {
-    let renderer = MarkdownRenderer::new(base_url);
-    renderer.markdown_to_html(text)
+    MarkdownRenderer::new(base_url, Markdown)
+        .to_html(text)
+        .unwrap() // infallible
 }
 
 /// Any readme with a filename ending in one of these extensions will be rendered as Markdown.
@@ -450,7 +471,7 @@ mod tests {
 
     #[test]
     fn readme_to_html_renders_other_things() {
-        for f in &["readme.exe", "readem.not_org", "blah.adoc"] {
+        for f in &["readme.exe", "readem.not_org>:)", "blah.adoc"] {
             assert_eq!(
                 readme_to_html("<script>lobster</script>\n\nis my friend\n", f, None),
                 "&lt;script&gt;lobster&lt;/script&gt;<br>\n<br>\nis my friend<br>\n"
